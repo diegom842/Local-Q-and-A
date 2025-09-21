@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Offline Q&A</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar" role="banner">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/></svg>
+        <span class="title">Q&amp;A Session</span>
+      </div>
+      <div class="session-meta" aria-live="polite">
+        <span class="dot"></span><span class="label">Live</span>
+      </div>
+    </header>
+
+    <section class="composer" aria-labelledby="ask-label">
+      <h2 id="ask-label" class="visually-hidden">Ask a question</h2>
+      <form id="ask-form" class="ask">
+        <input id="ask-input" class="input" type="text" maxlength="500" placeholder="Type your question…" required aria-describedby="char-hint"/>
+        <button type="submit" class="btn btn-accent">Submit</button>
+        <div id="char-hint" class="hint" aria-live="polite"></div>
+      </form>
+    </section>
+
+    <section class="stack" aria-labelledby="list-label">
+      <div class="stack-head">
+        <h2 id="list-label">Top questions</h2>
+        <div class="stack-actions">
+          <div class="segmented" role="group" aria-label="Sort questions">
+            <button class="chip" type="button" data-sort="top" aria-pressed="true">Top</button>
+            <button class="chip" type="button" data-sort="recent" aria-pressed="false">Recent</button>
+          </div>
+          <button id="refresh" class="btn btn-ghost" type="button" aria-label="Refresh list">↻</button>
+        </div>
+      </div>
+      <ul id="list" class="cards" role="list">
+        <!-- items injected here -->
+      </ul>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
