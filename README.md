@@ -1,21 +1,19 @@
-# Offline Q&A (FastAPI + SQLite + SSE)
+# Offline Response Collector with Live Word Cloud
 
-## 1) Install
-Python 3.10+ recommended.
-
+## Setup
 ```bash
 python -m venv .venv
-source .venv/bin/activate    # Windows: .venv\Scripts\activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-2) Run (bind to all interfaces for LAN)
+```
+
+## Run
+```bash
 uvicorn app:app --host 0.0.0.0 --port 8080 --reload
-3) Connect
-On the host machine: http://localhost:8080
-On phones/laptops in the same Wi-Fi:
-Find your IP (macOS): ipconfig getifaddr en0 (try en1 if needed)
-Example: http://192.168.1.23:8080
-Notes
-Data stored in app.db (SQLite). WAL mode enabled for safe concurrent writes.
-One vote per device per question enforced via cookie did + DB composite primary key.
-Server-Sent Events (/events) push new questions and votes to all connected clients.
-No internet required after installing dependencies.
+```
+
+## Usage
+Open `http://localhost:8080/`, submit short responses, and watch the word cloud update live. The app works fully offline once dependencies are installed.
+
+## LAN Tip
+For guests on your network, consider proxying to port 80 so they can use a friendly address like `http://qna.lan`. Otherwise, share `http://<host-ip>:8080`.

@@ -2,61 +2,54 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Offline Q&A</title>
+  <title>Offline Response Collector</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <main class="shell">
-    <header class="topbar" role="banner">
-      <div class="brand">
-        <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/></svg>
-        <span class="title">[make]new anonymous q&amp;a</span>
+    <header class="page-header">
+      <div class="header-text">
+        <p class="eyebrow" aria-hidden="true">Prompt</p>
+        <h1 class="title">Who is Jesus?</h1>
       </div>
-      <div class="session-meta" aria-live="polite">
-        <span class="dot"></span><span class="label">Live</span>
-      </div>
+      <img src="/static/mn_logo.png" alt="Make New logo" class="brand-mark" />
     </header>
 
-    <div id="offline-banner" class="offline" role="status" hidden>
-      You appear to be offline. Votes and questions will sync when reconnected.
-    </div>
+    <section class="hero" aria-labelledby="cloud-label">
+      <h2 id="cloud-label" class="visually-hidden">Live word cloud</h2>
+      <div class="hero-card">
+        <div class="hero-media">
+          <img id="cloud" src="/wordcloud.png" alt="Live word cloud" />
+        </div>
+      </div>
+    </section>
 
-    <section class="composer" aria-labelledby="ask-label">
-      <h2 id="ask-label" class="visually-hidden">Ask a question</h2>
-      <form id="ask-form" class="ask">
-        <input id="ask-input" class="input" type="text" maxlength="500" placeholder="Type your question…" required aria-describedby="char-hint" inputmode="text" enterkeyhint="send" autocomplete="off" />
-        <button type="submit" class="btn btn-accent">Submit</button>
-        <div id="char-hint" class="hint" aria-live="polite"></div>
+    <section class="composer" aria-labelledby="response-label">
+      <h2 id="response-label" class="visually-hidden">Submit a response</h2>
+      <form id="response-form" class="response-form" autocomplete="off">
+        <label class="visually-hidden" for="response-input">Response</label>
+        <input
+          id="response-input"
+          name="body"
+          class="input"
+          type="text"
+          placeholder="Share a thought…"
+          required
+          minlength="1"
+          maxlength="120"
+          inputmode="text"
+          enterkeyhint="send"
+          autocomplete="off"
+        />
+        <span id="char-counter" class="hint" aria-live="polite">0/120</span>
+        <button type="submit" class="btn">Submit</button>
       </form>
     </section>
 
-    <section class="stack" aria-labelledby="list-label">
-      <div class="stack-head">
-        <h2 id="list-label">Top questions</h2>
-        <div class="stack-actions">
-          <div class="segmented" role="group" aria-label="Sort questions">
-            <button class="chip" type="button" data-sort="top" data-index="0" aria-pressed="true">Top</button>
-            <button class="chip" type="button" data-sort="recent" data-index="1" aria-pressed="false">Recent</button>
-          </div>
-          <button id="refresh" class="btn btn-ghost" type="button" aria-label="Refresh list" title="Refresh list">↻</button>
-        </div>
-      </div>
-      <ul id="list" class="cards" role="list">
-        <!-- items injected here -->
-      </ul>
-      <div id="empty" class="empty" hidden>
-        <div class="empty-card" role="presentation">
-          <div class="emoji" aria-hidden="true">💬</div>
-          <p>Nothing here yet. Ask the first question!</p>
-        </div>
-      </div>
-    </section>
-
-    <div id="sr-status" class="sr-only" role="status" aria-live="polite"></div>
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   </main>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js" defer></script>
 </body>
 </html>

@@ -1,315 +1,530 @@
 import asyncio
-import json
+import io
+import math
 import os
+import json
+import re
 import time
-import uuid
-from typing import AsyncIterator, Dict, List, Literal, Optional
+from typing import AsyncIterator, Dict, List, Optional, Tuple
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import case, event, func
-from sqlalchemy.engine import Engine
-from sqlmodel import Field, Relationship, SQLModel, Session, create_engine, select
-
-# ---- Models ----
-
-class Question(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    body: str = Field(index=False)
-    created_at: float = Field(default_factory=lambda: time.time())
-    votes: List["Vote"] = Relationship(back_populates="question")
-
-
-class Device(SQLModel, table=True):
-    id: str = Field(primary_key=True)  # UUID from cookie
-    first_seen: float = Field(default_factory=lambda: time.time())
-    last_seen: float = Field(default_factory=lambda: time.time())
-    user_agent: Optional[str] = None
-    last_ip: Optional[str] = None
-    votes: List["Vote"] = Relationship(back_populates="device")
-
-
-class Vote(SQLModel, table=True):
-    question_id: int = Field(foreign_key="question.id", primary_key=True)
-    device_id: str = Field(foreign_key="device.id", primary_key=True)
-    created_at: float = Field(default_factory=lambda: time.time())
-    question: Optional[Question] = Relationship(back_populates="votes")
-    device: Optional[Device] = Relationship(back_populates="votes")
-
-
-# ---- DB setup ----
+from sqlmodel import Field, SQLModel, Session, create_engine, select
+from wordcloud import WordCloud
+from PIL import Image
+from better_profanity import profanity
 
 DATABASE_URL = "sqlite:///./app.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
 
-@event.listens_for(Engine, "connect")
-def set_sqlite_pragma(dbapi_connection, connection_record):
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL;")
-    cursor.execute("PRAGMA foreign_keys=ON;")
-    cursor.close()
+class ResponseEntry(SQLModel, table=True):
+    __tablename__ = "question"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    body: str
+    created_at: float = Field(default_factory=lambda: time.time())
 
 
-def init_db():
-    SQLModel.metadata.create_all(engine)
+CUSTOM_PROFANE_TERMS = [
+    "motherfucker",
+    "fuck",
+    "shit",
+    "bitch",
+    "asshole",
+    "bastard",
+    "cunt",
+    "dick",
+    "cock",
+    "pussy",
+    "slut",
+    "whore",
+    "damn",
+    "bollocks",
+    "wanker",
+    "naughty",
+    "naked",
+    "sexy",
+    "sex",
+    "porn",
+    "porno",
+    "pornography",
+    "erotic",
+    "penis",
+    "vagina",
+    "breasts",
+    "boobs",
+    "butt",
+    "butts",
+    "booty",
+    "orgasm",
+    "lust",
+    "intimate",
+]
 
+ALLOWED_RELIGIOUS_TERMS = {
+    "god",
+    "gods",
+    "jesus",
+    "christ",
+    "jesus christ",
+    "lord",
+    "savior",
+    "messiah",
+    "yahweh",
+    "jehovah",
+    "holy",
+    "holy spirit",
+    "holy-spirit",
+    "spirit",
+}
 
-# ---- App & SSE hub ----
+STOPWORDS = {
+    "a",
+    "about",
+    "after",
+    "all",
+    "also",
+    "am",
+    "an",
+    "and",
+    "any",
+    "are",
+    "as",
+    "at",
+    "be",
+    "been",
+    "before",
+    "being",
+    "but",
+    "by",
+    "can",
+    "could",
+    "did",
+    "do",
+    "does",
+    "doing",
+    "down",
+    "during",
+    "each",
+    "few",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "having",
+    "he",
+    "her",
+    "here",
+    "hers",
+    "herself",
+    "him",
+    "himself",
+    "his",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "itself",
+    "just",
+    "me",
+    "more",
+    "most",
+    "my",
+    "myself",
+    "no",
+    "nor",
+    "not",
+    "now",
+    "of",
+    "off",
+    "on",
+    "once",
+    "only",
+    "or",
+    "other",
+    "our",
+    "ours",
+    "ourselves",
+    "out",
+    "over",
+    "own",
+    "same",
+    "she",
+    "should",
+    "so",
+    "some",
+    "such",
+    "than",
+    "that",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "themselves",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "through",
+    "to",
+    "too",
+    "under",
+    "until",
+    "up",
+    "very",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "who",
+    "whom",
+    "why",
+    "will",
+    "with",
+    "you",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
+}
 
-app = FastAPI(title="Offline Q&A")
+MAX_TOKEN_LENGTH = 40
+DEFAULT_WIDTH = 1200
+DEFAULT_HEIGHT = 600
+MAX_WIDTH = 2000
+MAX_HEIGHT = 1200
+RATE_LIMIT_SECONDS = 3.0
+
+TOKEN_PATTERN = re.compile(r"[^\w\s'-]+")
+
+FONT_CANDIDATES = [
+    "/System/Library/Fonts/SFCompactRounded-Semibold.otf",
+    "/System/Library/Fonts/SFNSRounded.ttf",
+    "/Library/Fonts/SFCompactRounded-Semibold.otf",
+    "/Library/Fonts/Signika Negative.ttf",
+    "/Library/Fonts/SignikaNegative-Regular.ttf",
+    "/System/Library/Fonts/Supplemental/SignikaNegative-Regular.ttf",
+    "/usr/share/fonts/truetype/signika/SignikaNegative-Regular.ttf",
+    "/usr/share/fonts/google/SignikaNegative-Regular.ttf",
+    "C:/Windows/Fonts/SignikaNegative-Regular.ttf",
+    "/System/Library/Fonts/Supplemental/Impact.ttf",
+    "/Library/Fonts/Impact.ttf",
+    "C:/Windows/Fonts/impact.ttf",
+]
+
+WORDCLOUD_FONT_PATH = next((p for p in FONT_CANDIDATES if os.path.exists(p)), None)
+
+profanity.load_censor_words()
+profanity.add_censor_words(CUSTOM_PROFANE_TERMS)
+profanity.CENSOR_WORDSET = [word for word in profanity.CENSOR_WORDSET if str(word).lower() not in {term.lower() for term in ALLOWED_RELIGIOUS_TERMS}]
+app = FastAPI(title="Offline Response Collector")
 app.mount("/static", StaticFiles(directory="static", html=False), name="static")
 
-# Each subscriber gets an asyncio.Queue of server-sent event strings
 _subscribers: List[asyncio.Queue[str]] = []
 _subscribers_lock = asyncio.Lock()
+_rate_limit_lock = asyncio.Lock()
+_last_submission_by_ip: Dict[str, float] = {}
+
+_wordcloud_cache_lock = asyncio.Lock()
+_wordcloud_cache: Dict[str, object] = {
+    "dirty": True,
+    "entries": {},  # type: ignore[dict-item]
+    "last_dirty_at": 0.0,
+}
 
 
-@app.middleware("http")
-async def ensure_device_cookie(request: Request, call_next):
-    did = request.cookies.get("did")
-    new_did = False
-    if not did:
-        did = str(uuid.uuid4())
-        new_did = True
+def init_db() -> None:
+    SQLModel.metadata.create_all(engine)
 
-    request.state.device_id = did
-
-    with Session(engine) as session:
-        dev = session.get(Device, did)
-        if not dev:
-            dev = Device(
-                id=did,
-                user_agent=request.headers.get("user-agent"),
-                last_ip=request.client.host if request.client else None,
-            )
-            session.add(dev)
-        else:
-            dev.last_seen = time.time()
-            dev.user_agent = request.headers.get("user-agent")
-            dev.last_ip = request.client.host if request.client else dev.last_ip
-        session.commit()
-
-    response = await call_next(request)
-
-    if new_did:
-        response.set_cookie(
-            key="did",
-            value=did,
-            httponly=True,
-            samesite="lax",
-            path="/",
-        )
-
-    return response
-
-
-async def broadcast(event_type: str, payload: Dict):
-    data = json.dumps(payload, separators=(",", ":"))
-    msg = f"event: {event_type}\n" f"data: {data}\n\n"
-    async with _subscribers_lock:
-        for q in list(_subscribers):
-            # Don't await put forever; if a queue is full or dead, ignore
-            try:
-                q.put_nowait(msg)
-            except asyncio.QueueFull:
-                # Best-effort: drop this subscriber
-                try:
-                    _subscribers.remove(q)
-                except ValueError:
-                    pass
-
-
-async def sse_event_generator(q: asyncio.Queue[str]) -> AsyncIterator[str]:
-    # Heartbeat to keep connections alive
-    try:
-        while True:
-            try:
-                msg = await asyncio.wait_for(q.get(), timeout=20.0)
-                yield msg
-            except asyncio.TimeoutError:
-                yield ": ping\n\n"
-    except asyncio.CancelledError:
-        return
-
-
-# ---- Utilities ----
 
 def get_session():
     with Session(engine) as session:
         yield session
 
 
-def get_device_id(request: Request) -> str:
-    did = getattr(request.state, "device_id", None)
-    if not did:
-        raise HTTPException(status_code=500, detail="Device ID unavailable")
-    return did
+def _prepare_frequencies(texts: List[str]) -> Tuple[Dict[str, int], bool]:
+    counts: Dict[str, int] = {}
+    for raw in texts:
+        lowered = raw.strip().lower()
+        if not lowered:
+            continue
+        normalized = TOKEN_PATTERN.sub(" ", lowered).strip()
+        if not normalized:
+            continue
+        normalized = re.sub(r"\s+", " ", normalized)[:MAX_TOKEN_LENGTH]
+        if normalized in STOPWORDS:
+            continue
+        counts[normalized] = counts.get(normalized, 0) + 1
+    if not counts:
+        return {}, True
+    return counts, False
 
 
-def validate_body(text: str) -> str:
-    body = (text or "").strip()
-    if not (1 <= len(body) <= 500):
-        raise HTTPException(status_code=400, detail="Question must be 1..500 characters.")
+def _mix_with_white(hex_color: str, amount: float) -> str:
+    amount = max(0.0, min(amount, 1.0))
+    hex_color = hex_color.lstrip("#")
+    r, g, b = [int(hex_color[i:i + 2], 16) for i in range(0, 6, 2)]
+    r = round(r + (255 - r) * amount)
+    g = round(g + (255 - g) * amount)
+    b = round(b + (255 - b) * amount)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _build_wordcloud_png(texts: List[str], width: int, height: int) -> Tuple[bytes, bool]:
+    frequencies, is_placeholder = _prepare_frequencies(texts)
+    if is_placeholder:
+        image = Image.new("RGB", (width, height), "white")
+    else:
+        kwargs = {
+            "width": width,
+            "height": height,
+            "background_color": "white",
+            "stopwords": STOPWORDS,
+            "max_words": 200,
+            "collocations": False,
+            "normalize_plurals": True,
+            "prefer_horizontal": 1.0,
+        }
+        if WORDCLOUD_FONT_PATH:
+            kwargs["font_path"] = WORDCLOUD_FONT_PATH
+        cloud = WordCloud(**kwargs).generate_from_frequencies(frequencies)
+
+        ordered = sorted(cloud.words_.items(), key=lambda item: item[1], reverse=True)
+        total_words = len(ordered)
+
+        if total_words:
+            top_quartile_count = max(1, math.ceil(total_words * 0.25))
+            rare_count = min(2, max(1, round(total_words * 0.05)))
+            rare_count = min(rare_count, total_words)
+        else:
+            top_quartile_count = 0
+            rare_count = 0
+
+        neutral_palette = [
+            "#1C2A39",
+            "#2F3A4A",
+            "#5B6573",
+            _mix_with_white("#1C2A39", 0.08),
+            _mix_with_white("#2F3A4A", 0.06),
+        ]
+        emerald_base = "#2F855A"
+        accent_palette = [
+            emerald_base,
+            _mix_with_white(emerald_base, 0.1),
+            _mix_with_white(emerald_base, 0.18),
+        ]
+        rare_palette = ["#B65A38", "#B28B2C"]
+
+        rare_words = {word for word, _ in ordered[:rare_count]}
+        accent_words = {word for word, _ in ordered[:top_quartile_count]} - rare_words
+
+        word_colors: Dict[str, str] = {}
+        for idx, (word, _weight) in enumerate(ordered):
+            if word in rare_words:
+                color = rare_palette[idx % len(rare_palette)]
+            elif word in accent_words:
+                color = accent_palette[idx % len(accent_palette)]
+            else:
+                color = neutral_palette[idx % len(neutral_palette)]
+            word_colors[word] = color
+
+        def color_func(word, font_size, position, orientation, random_state=None, **kwargs):
+            return word_colors.get(word, neutral_palette[0])
+
+        image = cloud.recolor(color_func=color_func, random_state=33).to_image()
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue(), is_placeholder
+
+
+async def _ensure_rate_limit(ip: str) -> None:
+    now = time.time()
+    async with _rate_limit_lock:
+        last_seen = _last_submission_by_ip.get(ip)
+        if last_seen and now - last_seen < RATE_LIMIT_SECONDS:
+            raise HTTPException(status_code=429, detail="Please wait a moment before submitting again.")
+        _last_submission_by_ip[ip] = now
+        if len(_last_submission_by_ip) > 512:
+            stale_cutoff = now - 30.0
+            for key, value in list(_last_submission_by_ip.items()):
+                if value < stale_cutoff:
+                    _last_submission_by_ip.pop(key, None)
+
+
+async def _broadcast(event_type: str, payload: Dict[str, object]) -> None:
+    data = json.dumps(payload, separators=(",", ":"))
+    message = f"event: {event_type}\n" f"data: {data}\n\n"
+    async with _subscribers_lock:
+        for queue in list(_subscribers):
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                try:
+                    _subscribers.remove(queue)
+                except ValueError:
+                    pass
+
+
+async def _sse_event_generator(queue: asyncio.Queue[str]) -> AsyncIterator[str]:
+    try:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(queue.get(), timeout=20.0)
+                yield chunk
+            except asyncio.TimeoutError:
+                yield ": heartbeat\n\n"
+    except asyncio.CancelledError:
+        return
+
+
+def _mark_wordcloud_dirty() -> None:
+    _wordcloud_cache["dirty"] = True
+    _wordcloud_cache["last_dirty_at"] = time.time()
+
+
+async def _get_wordcloud_bytes(texts: List[str], width: int, height: int) -> Tuple[bytes, bool]:
+    key: Tuple[int, int] = (width, height)
+    entries: Dict[Tuple[int, int], Tuple[bytes, bool]] = _wordcloud_cache.setdefault("entries", {})  # type: ignore[assignment]
+
+    if not _wordcloud_cache.get("dirty"):
+        cached = entries.get(key)
+        if cached is not None:
+            return cached
+
+    async with _wordcloud_cache_lock:
+        if not _wordcloud_cache.get("dirty"):
+            cached = entries.get(key)
+            if cached is not None:
+                return cached
+
+        if _wordcloud_cache.get("dirty"):
+            entries.clear()
+
+        data = await asyncio.to_thread(_build_wordcloud_png, texts, width, height)
+        entries[key] = data
+        _wordcloud_cache["dirty"] = False
+        _wordcloud_cache["last_dirty_at"] = time.time()
+        return data
+
+
+def _validate_body(value: str) -> str:
+    body = (value or "").strip()
+    if not (1 <= len(body) <= 120):
+        raise HTTPException(status_code=400, detail="Responses must be between 1 and 120 characters.")
+    if profanity.contains_profanity(body):
+        raise HTTPException(status_code=400, detail="Please keep submissions respectful.")
     return body
 
 
-# ---- Routes ----
-
 @app.on_event("startup")
-async def on_startup():
+async def on_startup() -> None:
     init_db()
 
 
 @app.on_event("shutdown")
-async def on_shutdown():
-    # Dispose connections then remove database artifacts for a fresh start next run
+async def on_shutdown() -> None:
     engine.dispose()
-    for name in ("app.db", "app.db-shm", "app.db-wal"):
+    for suffix in ("", "-shm", "-wal"):
+        filename = f"app.db{suffix}"
         try:
-            os.remove(name)
+            os.remove(filename)
         except FileNotFoundError:
             continue
         except OSError:
-            # Ignore issues like permission errors; surfaces on next startup if critical
             pass
+    _wordcloud_cache["dirty"] = True
+    entries = _wordcloud_cache.get("entries")
+    if isinstance(entries, dict):
+        entries.clear()
 
 
-@app.get("/api/health")
-def health():
-    return {"ok": True, "time": time.time()}
+@app.post("/api/responses")
+async def create_response(payload: Dict[str, str], request: Request, session: Session = Depends(get_session)):
+    client_host = request.client.host if request.client else "unknown"
+    await _ensure_rate_limit(client_host)
+
+    body = _validate_body(payload.get("body", ""))
+    entry = ResponseEntry(body=body)
+    session.add(entry)
+    session.commit()
+    session.refresh(entry)
+
+    _mark_wordcloud_dirty()
+    await _broadcast("response-created", {"id": entry.id})
+
+    return {"id": entry.id, "body": entry.body, "created_at": entry.created_at}
 
 
-@app.get("/api/questions")
-def list_questions(
-    request: Request,
-    sort: Literal["top", "recent"] = "top",
+@app.get("/wordcloud.png")
+async def wordcloud_endpoint(
+    width: int = Query(DEFAULT_WIDTH, ge=100),
+    height: int = Query(DEFAULT_HEIGHT, ge=100),
     session: Session = Depends(get_session),
 ):
-    did = get_device_id(request)
-    # Select questions with vote counts
-    user_voted_flag = func.max(case((Vote.device_id == did, 1), else_=0)).label("user_voted")
+    bounded_width = max(100, min(width, MAX_WIDTH))
+    bounded_height = max(100, min(height, MAX_HEIGHT))
 
-    q = (
-        select(
-            Question.id,
-            Question.body,
-            Question.created_at,
-            func.count(Vote.device_id).label("upvotes"),
-            user_voted_flag,
-        )
-        .select_from(Question)
-        .join(Vote, Vote.question_id == Question.id, isouter=True)
-        .group_by(Question.id)
+    entries: Dict[Tuple[int, int], Tuple[bytes, bool]] = _wordcloud_cache.setdefault("entries", {})  # type: ignore[assignment]
+    key: Tuple[int, int] = (bounded_width, bounded_height)
+    if not _wordcloud_cache.get("dirty"):
+        cached = entries.get(key)
+        if cached is not None:
+            content, is_placeholder = cached
+            return Response(
+                content=content,
+                media_type="image/png",
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Wordcloud-Empty": "1" if is_placeholder else "0",
+                },
+            )
+
+    texts = session.exec(select(ResponseEntry.body)).all()
+    content, is_placeholder = await _get_wordcloud_bytes(texts, bounded_width, bounded_height)
+    return Response(
+        content=content,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Wordcloud-Empty": "1" if is_placeholder else "0",
+        },
     )
-    rows = session.exec(q).all()
-    # Sort in Python for clarity: upvotes desc, created_at asc
-    if sort == "recent":
-        rows_sorted = sorted(rows, key=lambda r: (-r.created_at, r.id))
-    else:
-        rows_sorted = sorted(rows, key=lambda r: (-r.upvotes, r.created_at))
-    # Convert to dicts
-    return [
-        {
-            "id": r.id,
-            "body": r.body,
-            "created_at": r.created_at,
-            "upvotes": int(r.upvotes),
-            "user_voted": bool(r.user_voted),
-        }
-        for r in rows_sorted
-    ]
-
-
-@app.post("/api/questions")
-async def create_question(payload: Dict, request: Request, session: Session = Depends(get_session)):
-    _ = get_device_id(request)  # author remains anonymous
-    body = validate_body(payload.get("body", ""))
-    q = Question(body=body)
-    session.add(q)
-    session.commit()
-    session.refresh(q)
-    # Broadcast creation
-    await broadcast("question-created", {"id": q.id, "body": q.body, "created_at": q.created_at, "upvotes": 0})
-    return {"id": q.id, "body": q.body, "created_at": q.created_at}
-
-
-@app.post("/api/questions/{qid}/vote")
-async def vote_question(qid: int, request: Request, session: Session = Depends(get_session)):
-    did = get_device_id(request)
-    q = session.get(Question, qid)
-    if not q:
-        raise HTTPException(status_code=404, detail="Question not found")
-
-    existing = session.get(Vote, (qid, did))
-    if existing:
-        count_stmt = select(func.count(Vote.device_id)).where(Vote.question_id == qid)
-        current = int(session.exec(count_stmt).one())
-        return {"ok": True, "question_id": qid, "upvotes": current, "already_voted": True}
-
-    session.add(Vote(question_id=qid, device_id=did))
-    session.commit()
-
-    count_stmt = select(func.count(Vote.device_id)).where(Vote.question_id == qid)
-    current = int(session.exec(count_stmt).one())
-
-    # Broadcast vote
-    await broadcast("vote-cast", {"question_id": qid, "upvotes": current})
-    return {"ok": True, "question_id": qid, "upvotes": current, "already_voted": False}
-
-
-@app.delete("/api/questions/{qid}/vote")
-async def unvote_question(qid: int, request: Request, session: Session = Depends(get_session)):
-    did = get_device_id(request)
-    vote = session.get(Vote, (qid, did))
-    if not vote:
-        count_stmt = select(func.count(Vote.device_id)).where(Vote.question_id == qid)
-        current = int(session.exec(count_stmt).one())
-        return {"ok": True, "question_id": qid, "upvotes": current, "removed": False}
-
-    session.delete(vote)
-    session.commit()
-
-    count_stmt = select(func.count(Vote.device_id)).where(Vote.question_id == qid)
-    current = int(session.exec(count_stmt).one())
-    await broadcast("vote-cast", {"question_id": qid, "upvotes": current})
-    return {"ok": True, "question_id": qid, "upvotes": current, "removed": True}
 
 
 @app.get("/events")
 async def sse(request: Request):
-    """
-    Server-Sent Events endpoint.
-    Each client gets its own queue; we remove it on disconnect.
-    """
-    q: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=128)
     async with _subscribers_lock:
-        _subscribers.append(q)
+        _subscribers.append(queue)
 
-    async def event_stream():
+    async def event_stream() -> AsyncIterator[str]:
         try:
-            async for chunk in sse_event_generator(q):
-                # Client disconnected?
+            async for part in _sse_event_generator(queue):
                 if await request.is_disconnected():
                     break
-                yield chunk
+                yield part
         finally:
-            # Clean up on disconnect
             async with _subscribers_lock:
                 try:
-                    _subscribers.remove(q)
+                    _subscribers.remove(queue)
                 except ValueError:
                     pass
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-# Optional explicit root if needed; StaticFiles(html=True) already serves index:
-@app.get("/_debug", response_class=HTMLResponse)
-def debug_index():
-    return "<html><body><h1>Q&A server running</h1></body></html>"
-
-
-# Serve static frontend at root (must be last so API routes win for /api/*)
 app.mount("/", StaticFiles(directory="static", html=True), name="root")
